@@ -6,8 +6,9 @@ import (
 	"sync"
 )
 
+// A 2n+1 by 2n+1 kernel for convolution/filtering
 type Kernel64 interface {
-	Size() int
+	// The weights of the kernel in row major order
 	Kernel() []float64
 }
 
@@ -18,23 +19,19 @@ var (
 
 type fullKernel64 []float64
 
-func NewKernel64(w []float64) (Kernel64, error) {
-	s := int(math.Sqrt(float64(len(w))))
-	if s*s != len(w) {
+func NewKernel64(weights []float64) (Kernel64, error) {
+	size := int(math.Sqrt(float64(len(weights))))
+	if size*size != len(weights) {
 		return nil, ErrKernelNotSquare
 	}
-	if s%2 == 0 {
+	if size%2 == 0 {
 		return nil, ErrKernelNotOdd
 	}
-	return fullKernel64(w), nil
+	return fullKernel64(weights), nil
 }
 
 func (k fullKernel64) Kernel() []float64 {
 	return k
-}
-
-func (k fullKernel64) Size() int {
-	return int(math.Sqrt(float64(len(k))))/2 - 1
 }
 
 type separableKernel64 struct {
@@ -52,25 +49,33 @@ func NewSeparableKernel64(x, y []float64) (Kernel64, error) {
 }
 
 func (sk *separableKernel64) Kernel() []float64 {
-	n := len(sk.x)
-	k := make([]float64, n*n)
+	size := len(sk.x)
+	weights := make([]float64, size*size)
 	for y := range sk.y {
-		r := y * n
+		r := y * size
 		for x := range sk.x {
-			k[r+x] = sk.y[y] * sk.x[x]
+			weights[r+x] = sk.y[y] * sk.x[x]
 		}
 	}
-	return k
+	return weights
 }
 
-func (sk *separableKernel64) Size() int {
-	return len(sk.x) / 2
+func kernelSize(k Kernel64) int {
+	switch k.(type) {
+	case fullKernel64:
+		return int(math.Sqrt(float64(len(k.(fullKernel64)))))/2 - 1
+	case *separableKernel64:
+		return len(k.(*separableKernel64).x)
+	default:
+		return int(math.Sqrt(float64(len(k.Kernel()))))/2 - 1
+	}
+	panic("unreachable")
 }
 
 func (p *Image64) Convolved(k Kernel64) *Image64 {
 	switch k.(type) {
-	// case sepKernel64:
-	// 	return p.separableConvolution(k.(sepKernel64))
+	// case *separableKernel64:
+	// 	return p.separableConvolution(k.(*separableKernel64))
 	default:
 		return p.fullConvolution(k)
 	}
@@ -78,23 +83,28 @@ func (p *Image64) Convolved(k Kernel64) *Image64 {
 }
 
 func (p *Image64) fullConvolution(k Kernel64) *Image64 {
-	r := NewImage64(p.Rect)
-	hk := k.Size()
-	ks := hk*2 + 1
-	w := k.Kernel()
+	result := NewImage64(p.Rect)
+	halfKernel := kernelSize(k)
+	kernelStride := halfKernel*2 + 1
+	weights := k.Kernel()
 	width := p.Rect.Dx()
 	height := p.Rect.Dy()
 	var wg sync.WaitGroup
 
+	// divide rows between go routines
 	wg.Add(goRoutines)
 	for t := 0; t < goRoutines; t++ {
 		i0, i1 := goRountineRanges(0, height, t)
 		go func(y0, y1 int) {
+
+			// for each pixel
 			for y := y0; y < y1; y++ {
-				resultIndex := y * r.Stride
+				resultIndex := y * result.Stride
 				for x := 0; x < width; x++ {
-					v := float64(0.0)
-					for yk := -hk; yk <= hk; yk++ {
+
+					// convolve
+					v := float64(0)
+					for yk := -halfKernel; yk <= halfKernel; yk++ {
 						imageRowIndex := y + yk
 						if imageRowIndex < 0 {
 							imageRowIndex = 0
@@ -102,8 +112,8 @@ func (p *Image64) fullConvolution(k Kernel64) *Image64 {
 							imageRowIndex = height - 1
 						}
 						imageRowIndex *= p.Stride
-						kernelRowIndex := (yk + hk) * ks
-						for xk := -hk; xk <= hk; xk++ {
+						kernelRowIndex := (yk + halfKernel) * kernelStride
+						for xk := -halfKernel; xk <= halfKernel; xk++ {
 							imageColumnIndex := x + xk
 							if imageColumnIndex < 0 {
 								imageColumnIndex = 0
@@ -112,11 +122,12 @@ func (p *Image64) fullConvolution(k Kernel64) *Image64 {
 							}
 
 							iv := float64(p.Pix[imageRowIndex+imageColumnIndex])
-							kv := w[kernelRowIndex+xk+hk]
+							kv := weights[kernelRowIndex+xk+halfKernel]
 							v += iv * kv
 						}
 					}
-					r.Pix[resultIndex] = Color64(v)
+					result.Pix[resultIndex] = Color64(v)
+
 					resultIndex++
 				}
 			}
@@ -125,9 +136,61 @@ func (p *Image64) fullConvolution(k Kernel64) *Image64 {
 	}
 	wg.Wait()
 
-	return r
+	return result
 }
 
-func (p *Image64) separableConvolution(k separableKernel64) *Image64 {
-	return p
+func (image *Image64) separableConvolution(k *separableKernel64) *Image64 {
+	result := NewImage64(image.Rect)
+	buffer := NewImage64(image.Rect)
+	halfKernel := kernelSize(k)
+	width := image.Rect.Dx()
+	height := image.Rect.Dy()
+	var wg sync.WaitGroup
+
+	// divide rows between go routines
+	wg.Add(goRoutines)
+	for t := 0; t < goRoutines; t++ {
+		i0, i1 := goRountineRanges(0, height, t)
+		go func(y0, y1 int) {
+
+			// for each pixel
+			for y := y0; y < y1; y++ {
+				bufferIndex := y * buffer.Stride
+				for x := 0; x < width; x++ {
+
+					// horizontal convolution
+					v := float64(0)
+					for xk := -halfKernel; xk <= halfKernel; xk++ {
+						imageIndex := x + xk
+						if imageIndex < 0 {
+							imageIndex = 0
+						} else if imageIndex >= width {
+							imageIndex = width - 1
+						}
+						imageIndex += y * buffer.Stride
+						iv := float64(image.Pix[imageIndex])
+						kv := k.x[xk+halfKernel]
+						v += iv * kv
+					}
+					buffer.Pix[bufferIndex] = Color64(v)
+
+					bufferIndex++
+				}
+			}
+			wg.Done()
+		}(i0, i1)
+	}
+	wg.Wait()
+
+	// divide columns between go routines
+	wg.Add(goRoutines)
+	for t := 0; t < goRoutines; t++ {
+		i0, i1 := goRountineRanges(0, width, t)
+		go func(y0, y1 int) {
+			wg.Done()
+		}(i0, i1)
+	}
+	wg.Wait()
+
+	return result
 }

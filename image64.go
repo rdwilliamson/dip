@@ -14,6 +14,7 @@ type Image64 struct {
 	Rect   image.Rectangle
 }
 
+// Create a new Image64 with the rectangle's width and height.
 func NewImage64(r image.Rectangle) *Image64 {
 	width, height := r.Dx(), r.Dy()
 	return &Image64{
@@ -38,6 +39,7 @@ func (p *Image64) ColorModel() color.Model {
 	return Color64Model
 }
 
+// Always true.
 func (p *Image64) Opaque() bool {
 	return true
 }
@@ -57,6 +59,7 @@ func (p *Image64) SetColor64(x, y int, c Color64) {
 	p.Pix[(y-p.Rect.Min.Y)*p.Stride+(x-p.Rect.Min.X)] = c
 }
 
+// A portion of p specified by r that shares underlying pixels.
 func (p *Image64) SubImage(r image.Rectangle) image.Image {
 	r = r.Intersect(p.Rect)
 	if r.Empty() {
@@ -70,37 +73,55 @@ func (p *Image64) SubImage(r image.Rectangle) image.Image {
 	}
 }
 
+// Creates a grayscale copy of the image.
+// TODO split to go routines
 func ToImage64(i image.Image) *Image64 {
-	b := i.Bounds()
-	r := NewImage64(b)
-	draw.Draw(r, r.Rect, i, b.Min, draw.Src)
-	return r
+	bounds := i.Bounds()
+	result := NewImage64(bounds)
+	switch i.(type) {
+	// case Image64:
+	// TODO copy parts of underlying slice
+	default:
+		draw.Draw(result, result.Rect, i, bounds.Min, draw.Src)
+	}
+	return result
 }
 
+// Normalize scales all pixel Color64 values to the range [0. 1].
 func (img *Image64) Normalize() {
 	// find min and max
 	type minMax struct {
 		min, max Color64
 	}
 	minMaxCh := make(chan minMax, goRoutines)
+
+	// divide rows between go routines
 	for t := 0; t < goRoutines; t++ {
 		i0, i1 := goRountineRanges(img.Rect.Min.Y, img.Rect.Max.Y, t)
 		go func(y0, y1 int) {
 			mm := minMax{Color64(math.MaxFloat64), Color64(-math.MaxFloat64)}
+
+			// for each pixel
 			for y := y0; y < y1; y++ {
-				i := (y - img.Rect.Min.Y) * img.Stride
+				index := (y - img.Rect.Min.Y) * img.Stride
 				for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
-					if img.Pix[i] < mm.min {
-						mm.min = img.Pix[i]
-					} else if img.Pix[i] > mm.max {
-						mm.max = img.Pix[i]
+
+					// check if pixel is new min or max
+					v := img.Pix[index]
+					if v < mm.min {
+						mm.min = v
+					} else if v > mm.max {
+						mm.max = v
 					}
-					i++
+
+					index++
 				}
 			}
 			minMaxCh <- mm
 		}(i0, i1)
 	}
+
+	// collect results of go routines
 	mm := <-minMaxCh
 	for t := 1; t < goRoutines; t++ {
 		v := <-minMaxCh
@@ -114,15 +135,22 @@ func (img *Image64) Normalize() {
 
 	// normalize
 	scale := 1.0 / (mm.max - mm.min)
+
+	// divide rows between go routines
 	var wg sync.WaitGroup
 	wg.Add(goRoutines)
 	for t := 0; t < goRoutines; t++ {
 		i0, i1 := goRountineRanges(img.Rect.Min.Y, img.Rect.Max.Y, t)
 		go func(y0, y1 int) {
+
+			// for each pixel
 			for y := y0; y < y1; y++ {
 				i := (y - img.Rect.Min.Y) * img.Stride
 				for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+
+					// normalize
 					img.Pix[i] = (img.Pix[i] - mm.min) * scale
+
 					i++
 				}
 			}
