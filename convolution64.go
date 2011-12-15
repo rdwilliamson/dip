@@ -65,11 +65,11 @@ func (sk *separableKernel64) Kernel() []float64 {
 func kernelSize(k Kernel64) int {
 	switch k.(type) {
 	case fullKernel64:
-		return int(math.Sqrt(float64(len(k.(fullKernel64)))))/2
+		return int(math.Sqrt(float64(len(k.(fullKernel64))))) / 2
 	case *separableKernel64:
-		return len(k.(*separableKernel64).x)/2
+		return len(k.(*separableKernel64).x) / 2
 	default:
-		return int(math.Sqrt(float64(len(k.Kernel()))))/2
+		return int(math.Sqrt(float64(len(k.Kernel())))) / 2
 	}
 	panic("unreachable")
 }
@@ -206,7 +206,7 @@ func (image *Image64) separableConvolution(k *separableKernel64) *Image64 {
 						} else if bufferIndex >= height {
 							bufferIndex = height - 1
 						}
-						bufferIndex = bufferIndex * buffer.Stride + x
+						bufferIndex = bufferIndex*buffer.Stride + x
 						iv := float64(buffer.Pix[bufferIndex])
 						kv := k.y[yk+halfKernel]
 						v += iv * kv
